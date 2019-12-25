@@ -180,7 +180,7 @@ class ntpclient:
             # the last delta this allows us to calculate the drift of
             # our RTC and the required delta to feed into adjtime(3)
             # in the _adj_task() to slew the RTC.
-            delta = -sum(sorted(deltas)[1:3]) // 3
+            delta = -sum(sorted(deltas)[1:4]) // 3
             adj_sum = self.adj_sum
             if self.last_delta is None:
                 # This was the first actual average delta we got from this
