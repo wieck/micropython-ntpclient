@@ -63,6 +63,19 @@ class ntpclient:
         asyncio.create_task(self._adj_task())
 
     async def _poll_server(self):
+        # We try to stay with the same server as long as possible. Only
+        # lookup the address on startup or after errors.
+        if self.sock is None:
+            self.addr = socket.getaddrinfo(self.host, 123)[0][-1]
+            if self.debug:
+                print("ntpclient: new server address:", self.addr)
+
+            self.sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+            self.sock.connect(self.addr)
+
+            self.rstr = asyncio.StreamReader(self.sock)
+            self.wstr = asyncio.StreamWriter(self.sock)
+
         # Send the NTP v3 request to the server
         wbuf = bytearray(48)
         wbuf[0] = 0b00011011
@@ -72,7 +85,10 @@ class ntpclient:
         del wbuf
 
         # Get the server reply
-        rbuf = await self.rstr.read(48)
+        try:
+            rbuf = await asyncio.wait_for(self.rstr.read(48), 0.5)
+        except asyncio.TimeoutError:
+            raise Exception("Timeout receiving from server")
 
         # Record the microseconds it took for this NTP round trip
         roundtrip_us = utime.ticks_diff(utime.ticks_us(), start_ticks)
@@ -105,20 +121,6 @@ class ntpclient:
         return (delay, time_diff_us(tnow, t2), t2)
 
     async def _poll_task(self):
-        # We try to stay with the same server as long as possible. Only
-        # lookup the address on startup or after errors.
-        if self.sock is None:
-            self.addr = socket.getaddrinfo(self.host, 123)[0][-1]
-            if self.debug:
-                print("ntpclient: new server address:", self.addr)
-
-            self.sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-            self.sock.settimeout(0.2)
-            self.sock.connect(self.addr)
-
-            self.rstr = asyncio.StreamReader(self.sock)
-            self.wstr = asyncio.StreamWriter(self.sock)
-
         # Try to get a first server reading
         while True:
             try:
@@ -128,7 +130,7 @@ class ntpclient:
                 self.sock.close()
                 self.sock = None
                 self.addr = None
-                await asyncio.sleep(10)
+                await asyncio.sleep(4)
                 continue
             break
 
