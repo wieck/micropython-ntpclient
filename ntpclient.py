@@ -51,10 +51,10 @@ class ntpclient:
         self.max_startup_delta = int(max_startup_delta * 1000000)
         self.rtc = RTC()
         self.last_delta = None
-        self.drift_hist = None
+        self.drift_sum = 0
+        self.drift_num = 0
         self.adj_delta = 0
         self.adj_interval = adj_interval
-        self.adj_hist = [100000,-100000,0]
         self.adj_sum = 0
         self.adj_num = 0
         self.debug = debug
@@ -82,13 +82,12 @@ class ntpclient:
         start_ticks = utime.ticks_us()
         self.wstr.write(wbuf)
         await self.wstr.drain()
-        del wbuf
 
         # Get the server reply
         try:
             rbuf = await asyncio.wait_for(self.rstr.read(48), 0.5)
         except asyncio.TimeoutError:
-            raise Exception("Timeout receiving from server")
+            raise Exception("timeout receiving from server")
 
         # Record the microseconds it took for this NTP round trip
         roundtrip_us = utime.ticks_diff(utime.ticks_us(), start_ticks)
@@ -112,7 +111,7 @@ class ntpclient:
         t1 = (d1[0] - NTP_DELTA, int(d1[1] / 4294.967))
         t2 = (d2[0] - NTP_DELTA, int(d2[1] / 4294.967))
         #t3 = (0, roundtrip_us)
-        
+
         # Calculate the delay (round trip minus time spent on the server)
         delay = (roundtrip_us - time_diff_us(t2, t1))
 
@@ -161,29 +160,30 @@ class ntpclient:
             await asyncio.sleep_ms(wait_ms)
             del wait_ms
 
-            # Poll the server 5 times and record the deltas.
+            # Try to poll the server up to 3 times to get the current
+            # delta between the server's and our clock.
+            current = None
             try:
-                deltas = []
-                for i in range(0, 5):
+                for i in range(0, 3):
                     if i > 0:
                         await asyncio.sleep(2)
-                    current = await self._poll_server()
-                    deltas.append(current[1] - current[0] // 2)
+                    try:
+                        current = await self._poll_server()
+                    except Exception as ex:
+                        print("ntpclient: {0}".format(ex))
+                        continue
+                    break
+                if current is None:
+                    raise Exception("3/3 packets lost")
+                delta = -(current[1] - current[0] // 2)
             except Exception as ex:
-                print('ntpclient: _poll_task():', str(ex))
+                print("ntpclient: {0} - resetting connection".format(ex))
                 self.sock.close()
                 self.sock = None
                 self.addr = None
-                await asyncio.sleep(10)
+                self.poll = MIN_POLL
                 continue
 
-            # Discard the min and max and calculate the average of the
-            # remaining 3 results as our current delta. Together with
-            # the last delta this allows us to calculate the drift of
-            # our RTC and the required delta to feed into adjtime(3)
-            # in the _adj_task() to slew the RTC.
-            delta = -sum(sorted(deltas)[1:4]) // 3
-            adj_sum = self.adj_sum
             if self.last_delta is None:
                 # This was the first actual average delta we got from this
                 # server. Remember it and start over.
@@ -193,41 +193,42 @@ class ntpclient:
             corr = delta - self.last_delta
             self.last_delta = delta
             drift = (self.adj_sum + corr) // self.adj_num
-            if self.drift_hist is None:
-                self.drift_hist = [drift] * 3
-            else:
-                self.drift_hist = self.drift_hist[1:] + [drift]
-            avg_drift = sum(self.drift_hist) // len(self.drift_hist)
-            self.adj_delta = avg_drift + delta // self.adj_num * 3 // 4
+            self.drift_sum += drift
+            self.drift_num += 1
+            if self.drift_num >= 200:
+                self.drift_sum = (self.drift_sum // self.drift_num) * 100
+                self.drift_num = 100
+                if self.debug:
+                    print("ntpclient: drift average adjusted to {0}/{1}".format(
+                          self.drift_sum, self.drift_num))
 
-            # Depending on how close together or spread out our last
-            # 3 adj_delta values were we may increase or decrease
-            # the polling interval.
-            self.adj_hist = self.adj_hist[1:] + [self.adj_delta] 
-            adj_spread = max(self.adj_hist) - min(self.adj_hist)
-            if self.poll < self.req_poll:
-                if adj_spread < 5 * self.adj_interval:
+            avg_drift = self.drift_sum // self.drift_num
+            self.adj_delta = avg_drift + delta // self.adj_num // 2
+
+            # Adjust the poll interval when the measured adjustment
+            # per adj_interval is below or above a certain threshold.
+            # This means we poll less if we think we are close to
+            # the server and more often while homing in.
+            if self.poll < self.req_poll and self.drift_num > 25:
+                if abs(delta // self.adj_num) < 100:
                     self.poll <<= 1
             elif self.poll > MIN_POLL:
-                if adj_spread > 20 * self.adj_interval:
+                if abs(delta // self.adj_num) > 300:
                     self.poll >>= 1
             if self.debug:
                 print("ntpclient: state at", utime.localtime())
-                print("ntpclient: deltas:", deltas,
-                      "delta:", delta)
-                print("ntpclient: corr:", corr, "drift:", drift,
-                      "drift_hist:", self.drift_hist)
-                print("ntpclient: avg_drift:", avg_drift,
-                      "new adj_delta:", self.adj_delta)
-                print("ntpclient: adj_hist:", self.adj_hist,
+                print("ntpclient: delta:", delta,
+                      "per adj:", delta // self.adj_num)
+                print("ntpclient: drift_sum:", self.drift_sum,
+                      "num:", self.drift_num, "avg:", avg_drift)
+                print("ntpclient: new adj_delta:", self.adj_delta,
                       "new poll:", self.poll)
                 print("----")
             self.adj_sum = 0
             self.adj_num = 0
 
             # Cleanup
-            del deltas, delta, adj_sum, corr, drift, avg_drift, adj_spread
-            del current
+            del current, delta, corr, drift, avg_drift
 
     async def _adj_task(self):
         # This task slimply calls adjtime() every adj_interval seconds
