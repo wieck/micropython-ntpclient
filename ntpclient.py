@@ -1,6 +1,6 @@
 # ntpclient.py
 
-import sys
+import os
 import usocket as socket
 import ustruct as struct
 from machine import RTC, Pin
@@ -13,15 +13,25 @@ NTP_DELTA = 3155673600
 # (date(2000, 1, 1) - date(1970, 1, 1)).days * 24*60*60
 UNIX_DELTA = 946684800
 
-MIN_POLL = 64
-MAX_POLL = 1024
+# Poll interval
+_MIN_POLL = 64          # never poll faster than every 32 seconds
+_MAX_POLL = 1024        # default maximum poll interval
+_POLL_INC_AT = 50       # increase interval when the delta per second
+                        # falls below this number of microseconds
+_POLL_DEC_AT = 200      # decrease interval when the delta per second
+                        # grows above this number
 
-# Internally we use a struct tm based timestamp format, which is
-# a tuple composed of (sec, usec) based on epoch 2000-01-01.
+# Drift file configuration
+_DRIFT_FILE_VERSION = 1
+_DRIFT_NUM_MAX = 200    # Aggregate when we have this many samples
+_DRIFT_NUM_AVG = 100    # Aggregate down to this many and save drift file
 
 # time_add_us() -
 #   Adds a number of microseconds to a timestamp.
 #   Returns a timestamp.
+#
+#   Internally we use a struct tm based timestamp format, which is
+#   a tuple composed of (sec, usec) based on epoch 2000-01-01.
 def time_add_us(ts, us):
     usec = ts[1] + us
     if usec < 0:
@@ -38,16 +48,16 @@ def time_diff_us(ts1, ts2):
 # ntpclient -
 #   Class implementing the uasyncio based NTP client
 class ntpclient:
-    def __init__(self, host = 'pool.ntp.org', poll = MAX_POLL,
+    def __init__(self, host = 'pool.ntp.org', poll = _MAX_POLL,
                  adj_interval = 2, debug = False,
-                 max_startup_delta = 1.0):
+                 max_startup_delta = 1.0, drift_file = None):
         self.host = host
         self.sock = None
         self.addr = None
         self.rstr = None
         self.wstr = None
         self.req_poll = poll
-        self.poll = MIN_POLL
+        self.poll = _MIN_POLL
         self.max_startup_delta = int(max_startup_delta * 1000000)
         self.rtc = RTC()
         self.last_delta = None
@@ -57,10 +67,52 @@ class ntpclient:
         self.adj_interval = adj_interval
         self.adj_sum = 0
         self.adj_num = 0
+        self.drift_file = drift_file
         self.debug = debug
 
         asyncio.create_task(self._poll_task())
         asyncio.create_task(self._adj_task())
+
+    def drift_save(self):
+        # This is called every time we increase the polling interval
+        # or aggregate the drift summary data.
+        if self.drift_file is None:
+            return
+
+        try:
+            tmp = self.drift_file + '.tmp'
+            with open(tmp, 'w') as fd:
+                fd.write("version = {}\n".format(_DRIFT_FILE_VERSION))
+                fd.write("drift_sum = {}\n".format(self.drift_sum))
+                fd.write("drift_num = {}\n".format(self.drift_num))
+            os.rename(tmp, self.drift_file)
+        except Exception as ex:
+            print("ntpclient: drift_save():", ex)
+        if self.debug:
+            print("ntpclient: saved {}".format(self.drift_file))
+
+    def drift_load(self):
+        if self.drift_file is None:
+            return
+
+        try:
+            with open(self.drift_file, 'r') as fd:
+                info = {}
+                exec(fd.read(), globals(), info)
+                if info['version'] > _DRIFT_FILE_VERSION:
+                    print("ntpclient: WARNING - drift file version is {} "
+                          "- expected {}".format(info['version'],
+                                                 _DRIFT_FILE_VERSION))
+                self.drift_sum = info['drift_sum']
+                self.drift_num = info['drift_num']
+        except Exception as ex:
+            print("ntpclient: drift_load():", ex)
+            return
+        if self.debug:
+            print("ntpclient: loaded drift data {}/{}"
+                  " = {}".format(self.drift_sum, self.drift_num,
+                                 self.drift_sum // self.drift_num))
+
 
     async def _poll_server(self):
         # We try to stay with the same server as long as possible. Only
@@ -120,6 +172,9 @@ class ntpclient:
         return (delay, time_diff_us(tnow, t2), t2)
 
     async def _poll_task(self):
+        # Try loading an existing drift file
+        self.drift_load()
+
         # Try to get a first server reading
         while True:
             try:
@@ -181,7 +236,7 @@ class ntpclient:
                 self.sock.close()
                 self.sock = None
                 self.addr = None
-                self.poll = MIN_POLL
+                self.poll = _MIN_POLL
                 continue
 
             if self.last_delta is None:
@@ -195,9 +250,14 @@ class ntpclient:
             drift = (self.adj_sum + corr) // self.adj_num
             self.drift_sum += drift
             self.drift_num += 1
-            if self.drift_num >= 200:
-                self.drift_sum = (self.drift_sum // self.drift_num) * 100
-                self.drift_num = 100
+            if self.drift_num >= _DRIFT_NUM_MAX:
+                # When we have 200 samples we aggregate the data down to
+                # 100 samples in order to give an actual change in the
+                # drift a chance to change our average.
+                self.drift_sum = (self.drift_sum // self.drift_num) \
+                                 * _DRIFT_NUM_AVG
+                self.drift_num = _DRIFT_NUM_AVG
+                self.drift_save()
                 if self.debug:
                     print("ntpclient: drift average adjusted to {0}/{1}".format(
                           self.drift_sum, self.drift_num))
@@ -209,16 +269,18 @@ class ntpclient:
             # per adj_interval is below or above a certain threshold.
             # This means we poll less if we think we are close to
             # the server and more often while homing in.
+            delta_per_sec = delta // self.adj_num // self.adj_interval
             if self.poll < self.req_poll and self.drift_num > 25:
-                if abs(delta // self.adj_num) < 100:
+                if abs(delta_per_sec) < _POLL_INC_AT:
                     self.poll <<= 1
-            elif self.poll > MIN_POLL:
-                if abs(delta // self.adj_num) > 300:
+                    self.drift_save()
+            elif self.poll > _MIN_POLL:
+                if abs(delta_per_sec) > _POLL_DEC_AT:
                     self.poll >>= 1
             if self.debug:
                 print("ntpclient: state at", utime.localtime())
                 print("ntpclient: delta:", delta,
-                      "per adj:", delta // self.adj_num)
+                      "per_sec:", delta_per_sec)
                 print("ntpclient: drift_sum:", self.drift_sum,
                       "num:", self.drift_num, "avg:", avg_drift)
                 print("ntpclient: new adj_delta:", self.adj_delta,
