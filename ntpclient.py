@@ -13,13 +13,14 @@ NTP_DELTA = 3155673600
 # (date(2000, 1, 1) - date(1970, 1, 1)).days * 24*60*60
 UNIX_DELTA = 946684800
 
-# Poll interval
+# Poll and adjust intervals
 _MIN_POLL = 64          # never poll faster than every 32 seconds
 _MAX_POLL = 1024        # default maximum poll interval
 _POLL_INC_AT = 50       # increase interval when the delta per second
                         # falls below this number of microseconds
 _POLL_DEC_AT = 200      # decrease interval when the delta per second
                         # grows above this number
+_ADJ_INTERVAL = 2       # interval in seconds to call adjtime()
 
 # Drift file configuration
 _DRIFT_FILE_VERSION = 1
@@ -49,8 +50,8 @@ def time_diff_us(ts1, ts2):
 #   Class implementing the uasyncio based NTP client
 class ntpclient:
     def __init__(self, host = 'pool.ntp.org', poll = _MAX_POLL,
-                 adj_interval = 2, debug = False,
-                 max_startup_delta = 1.0, drift_file = None):
+                 max_startup_delta = 1, drift_file = None,
+                 debug = False):
         self.host = host
         self.sock = None
         self.addr = None
@@ -64,7 +65,6 @@ class ntpclient:
         self.drift_sum = 0
         self.drift_num = 0
         self.adj_delta = 0
-        self.adj_interval = adj_interval
         self.adj_sum = 0
         self.adj_num = 0
         self.drift_file = drift_file
@@ -266,10 +266,10 @@ class ntpclient:
             self.adj_delta = avg_drift + delta // self.adj_num // 2
 
             # Adjust the poll interval when the measured adjustment
-            # per adj_interval is below or above a certain threshold.
+            # per _ADJ_INTERVAL is below or above a certain threshold.
             # This means we poll less if we think we are close to
             # the server and more often while homing in.
-            delta_per_sec = delta // self.adj_num // self.adj_interval
+            delta_per_sec = delta // self.adj_num // _ADJ_INTERVAL
             if self.poll < self.req_poll and self.drift_num > 25:
                 if abs(delta_per_sec) < _POLL_INC_AT:
                     self.poll <<= 1
@@ -293,12 +293,12 @@ class ntpclient:
             del current, delta, corr, drift, avg_drift
 
     async def _adj_task(self):
-        # This task slimply calls adjtime() every adj_interval seconds
+        # This task slimply calls adjtime() every _ADJ_INTERVAL seconds
         # and sums up how much of a total slew it produced in how many
         # calls. The poll_task will use this feedback data in calculating
         # the new delay.
         while True:
-            await asyncio.sleep(self.adj_interval)
+            await asyncio.sleep(_ADJ_INTERVAL)
             if self.adj_delta != 0:
                 delta = self.adj_delta
                 utime.adjtime((0, delta))
