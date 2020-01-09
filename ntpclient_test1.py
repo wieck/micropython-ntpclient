@@ -32,7 +32,10 @@ async def test1_square(pin):
         print("{0:04d}-{1:02d}-{2:02d} {3:02d}:{4:02d}:{5:02d}".format(*now))
 
         # Wait for 100ms
-        delay = (100000 - rtc.datetime()[7]) // 1000
+        if sys.platform == 'esp32':
+            delay = (100000 - rtc.datetime()[7]) // 1000
+        elif sys.platform == 'esp8266':
+            delay = (100 - rtc.datetime()[7])
         if delay > 0:
             await asyncio.sleep_ms(delay)
 
