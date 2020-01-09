@@ -1,18 +1,21 @@
 micropython-ntpclient
 =====================
 
-A uasyncio based NTP client for ESP32 boards running micropython.
+A uasyncio based NTP client for ESP32/ESP8266 boards running micropython.
 
 **This is a proof of concept. Do not use in production at this point!**
 
-**At this moment this code only works on ESP32 based boards with a
+**At this moment this code only works on boards with a
 custom build and the new uasyncio module!**
 
 Please go to https://forum.micropython.org/viewtopic.php?f=18&t=7403
 for discussion and questions. 
 
-Required commit to be cherry-picked: 
+Required commit to be cherry-picked for ESP32: 
 https://github.com/wieck/micropython/commit/cd80a9aba99a68af7e295067fa7d35383ccef640
+
+Required commit to be cherry-picked for ESP8266: 
+https://github.com/wieck/micropython/commit/97e58630e74b024b58aeb5964d104973b361cad5
 
 Required uasyncio:
 https://github.com/dpgeorge/micropython/blob/extmod-uasyncio/extmod/uasyncio.py
@@ -21,48 +24,74 @@ https://github.com/dpgeorge/micropython/blob/extmod-uasyncio/extmod/uasyncio.py
 Installation and testing
 ------------------------
 
-The ntpclient module requires the above commit to be cherry-picked
-into a custom build of micropython. This adds the utime.adjtime() function
-that uses the adjtime(3) function of the ESP32 SDK.
+The ntpclient module requires the above commit(s) to be cherry-picked
+into a custom build of micropython. For the ESP32 it adds the utime.adjtime()
+function that uses the adjtime(3) function of the ESP32 SDK.
 
-Once your ESP32 board is flashed with that custom build, upload the
-ntpclient.py and ntpclient_test1.py scripts. You also need to upload
+Once your board is flashed with that custom build, upload the
+ntpclient directory and ntpclient_test[12].py scripts. You also need to upload
 a ```boot.py``` that enables WiFi and connects to your WLAN as well as
 the new uasyncio.
 
 Then use a REPL prompt and
 ```
 import ntpclient_test1
-ntpclient_test1.run(pps_pin = 17, host = 'my.local.ntp.host.addr', debug=True)
+ntpclient_test1.run(pps = 17, host = 'my.local.ntp.host.addr', debug=True)
 ```
 
 Replace "my.local.ntp.host.addr" with your local NTP server. If you don't have
 one, you can omit the whole "host=" kwarg and it will default to
 "pool.ntp.org". But be warned, those have unpredictably asynchronous
-delays in packet travel, which isn't very well tested at this moment.
+delays in packet travel.
 
 The above will run a uasyncio task that prints the current time every
-second as well as producing a 100ms pulse on the specified "pps_pin".
+second as well as producing a 100ms pulse on the specified "pps" pin.
 The ntpclient will be running in the background, constantly adjusting
-the ESP32's RTC. The ntpclient will occasionally output debug info like
+the boards RTC.
 
+Please note that attempting to slew a RTC while using deep sleep is
+not going to work. The ntpclient needs to adjust or calibrate the RTC
+every 2 seconds in order to be considered "in sync".
+
+If you have an SSD1306 OLED display you can also use ntpclient_test2.
 ```
-ntpclient: state at (2019, 12, 25, 4, 44, 18, 2, 359)
-ntpclient: deltas: [-533, -520, -701, -573, -630] delta: 401
-ntpclient: corr: 410 drift: -1 drift_hist: [0, -1, -1]
-ntpclient: avg_drift: -1 new adj_delta: -1
-ntpclient: adj_hist: [0, -2, -1] new poll: 1024
+import ntpclient_test1
+ntpclient_test1.run(pps = 17, host = 'my.local.ntp.host.addr', scl = 22, sda = 21, debug=True)
 ```
 
-The above tells us that the current average delta (time offset) between
-the NTP server and the ESP32 is 401us. During the last adjustment round
-that delta changed by 410us (corr). The RTC of the module is estimated
-to drift by -1us every 2ms (which is the not yet
-explained adjustment interval). Anyhow, as said, this isn't ready for
-prod ... the next NTP server poll will happen in 1024 seconds, which is
-about 17 minutes. Initially it will start polling every 64 seconds and
-only get to longer intervals if it becomes stable.
+Congratulations, you now have an NTP based clock that displays UTC.
 
-With nothing else running on the ESP32, you now have a clock that will
-most likely tell you the correct UTC time with only a few milliseconds
-of error.
+
+Implementation Notes
+--------------------
+
+The mechanism to adjust the RTC is very different for each platform.
+
+* On the ESP32 the RTC is running on the main XTAL while under full power.
+  The algorithm tries to calculate the current "drift" of that oscillator.
+  From this drift, measured in microseconds per adjustment interval, it
+  calculates a number of microseconds by which to "slew" the RTC every
+  two seconds using the new adjtime() function. This is basically a
+  simplified version of what ntpd does on a Unix system.
+
+* On the ESP8266 the RTC is running on an internal 150kHz oscillator.
+  This oscillator has some severe jitter and changes its speed by up to
+  +/- 5%, mostly caused by temperature changes. The above commit adds a
+  function machine.RTC.calibrate() which uses system_rtc_clock_cali_proc()
+  to recalibrate the clock based on the current main XTAL. It also
+  takes an optional argument by which the calibration value can be offset
+  in order to slew the clock. The function also adjusts the internal
+  "delta" value, that all time based functions use to calculate the
+  actual time since epoch.
+
+Both implementations make the RTC appear monotonic and keep it more or
+less in sync. Because the ESP8266 is not using a crystal based RTC, it
+will wander off between server polls by up to 50ms even when using a
+local NTP server (yes, that much). By default those server polls
+will eventually happen only every 17 minutes, once the system has
+settled in. The ntpclient class does take an optional "poll" argument,
+that lets you override the maximum poll interval, but please only use
+that if you also provide a local "host" as your NTP server. 'pool.ntp.org'
+are public servers that other people pay for. Squandering those
+resources because your microcontroller has a bad RTC implementation is
+not fair.
