@@ -1,3 +1,4 @@
+import sys
 from machine import I2C, Pin, RTC
 import uasyncio as asyncio
 import utime
@@ -5,24 +6,29 @@ import ssd1306
 
 import ntpclient
 
-i2c = I2C(-1, scl=Pin(22), sda=Pin(21))
-oled = ssd1306.SSD1306_I2C(128, 64, i2c)
-
-async def test2_square(pin):
-    global oled
-
+async def test2_square(pin, scl, sda):
+    i2c = I2C(-1, scl=scl, sda=sda)
+    oled = ssd1306.SSD1306_I2C(128, 64, i2c)
     rtc = RTC()
 
     while True:
-        # We want maximum precision, so we let await get us within 2ms,
-        # then use a blocking utime.sleep_us() to strike. Every now and
-        # the something will interfere ... meh.
-        delay = (1000000 - rtc.datetime()[7]) // 1000
-        if delay > 4:
-            await asyncio.sleep_ms(delay - 2)
-        delay = (1000000 - rtc.datetime()[7])
-        if delay > 0:
-            utime.sleep_us(delay)
+        if sys.platform == 'esp32':
+            # We want maximum precision, so we let await get us within 2ms,
+            # then use a blocking utime.sleep_us() to strike. Every now and
+            # the something will interfere ... meh.
+            delay = (1000000 - rtc.datetime()[7]) // 1000
+            if delay > 4:
+                await asyncio.sleep_ms(delay - 2)
+            delay = (1000000 - rtc.datetime()[7])
+            if delay > 0:
+                utime.sleep_us(delay)
+        elif sys.platform == 'esp8266':
+            # ESP8266 only has milliseconds, so no point in the above.
+            delay = (1000 - rtc.datetime()[7])
+            if delay > 0:
+                await asyncio.sleep_ms(delay)
+        else:
+            raise RuntimeError("unsupported platform '{}'".format(sys.platform))
 
         # Turn the pin on and print the current time on REPL
         pin.value(1)
@@ -40,9 +46,10 @@ async def test2_square(pin):
         # Turn the pin off
         pin.value(0)
 
-def run(pps_pin = 17, **kwarg):
-    pin = Pin(pps_pin, mode=Pin.OUT)
+def run(pps = None, scl = None, sda = None, **kwarg):
+    pps_pin = Pin(pps, mode=Pin.OUT)
+    scl_pin = Pin(scl)
+    sda_pin = Pin(sda)
     client = ntpclient.ntpclient(**kwarg)
-    asyncio.create_task(test2_square(pin))
+    asyncio.create_task(test2_square(pps_pin, scl_pin, sda_pin))
     asyncio.run_until_complete()
-
