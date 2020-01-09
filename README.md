@@ -8,7 +8,7 @@ A uasyncio based NTP client for ESP32/ESP8266 boards running micropython.
 **At this moment this code only works on boards with a
 custom build and the new uasyncio module!**
 
-Please go to https://forum.micropython.org/viewtopic.php?f=18&t=7403
+Please go to https://forum.micropython.org/viewtopic.php?f=15&t=7567
 for discussion and questions. 
 
 Required commit to be cherry-picked for ESP32: 
