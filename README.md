@@ -55,11 +55,19 @@ every 2 seconds in order to be considered "in sync".
 
 If you have an SSD1306 OLED display you can also use ntpclient_test2.
 ```
-import ntpclient_test1
-ntpclient_test1.run(pps = 17, host = 'my.local.ntp.host.addr', scl = 22, sda = 21, debug=True)
+import ntpclient_test2
+ntpclient_test2.run(pps = 17, host = 'my.local.ntp.host.addr', scl = 22, sda = 21, debug=True)
 ```
 
 Congratulations, you now have an NTP based clock that displays UTC.
+
+Saving Drift information
+------------------------
+
+On the ESP32 port an optional argument to the ntpclient instance is
+the path for a "drift_file". In this file ntpclient will periodically
+save drift information to speed up synchronization on subsequent
+reboots.
 
 
 Implementation Notes
