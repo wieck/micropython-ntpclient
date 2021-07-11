@@ -1,5 +1,11 @@
 # ntpclient_esp8266.py
 
+########################################################################
+# WARNING: This part of the ntpclient package is not maintained at this
+# point. The original functionality to slew the ESP8266 RTC was not
+# working reliable.
+########################################################################
+
 import os
 import usocket as socket
 import ustruct as struct

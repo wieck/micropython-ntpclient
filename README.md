@@ -1,7 +1,7 @@
 micropython-ntpclient
 =====================
 
-A uasyncio based NTP client for ESP32/ESP8266 boards running micropython.
+A uasyncio based NTP client for ESP32 boards running micropython.
 
 **At this moment this code only works on boards with a custom build
 micropython firmware.**
@@ -9,15 +9,12 @@ micropython firmware.**
 Please go to https://forum.micropython.org/viewtopic.php?f=15&t=7567
 for discussion and questions. 
 
-**The following commits were never accepted by the upstream project.
-In order to make the utime.adjtime() available please apply the
+**The following commit was never accepted by the upstream project.
+In order to make the utime.adjtime() function available please apply the
 included patch _esp32_adjtime.diff_ and build a custom micropython image.**
 
 ~~Required commit to be cherry-picked for ESP32: 
 https://github.com/wieck/micropython/commit/cd80a9aba99a68af7e295067fa7d35383ccef640~~
-
-~~Required commit to be cherry-picked for ESP8266: 
-https://github.com/wieck/micropython/commit/97e58630e74b024b58aeb5964d104973b361cad5~~
 
 
 Installation and testing
